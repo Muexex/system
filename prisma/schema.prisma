@@ -1,0 +1,211 @@
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "sqlite"
+}
+
+model WriteFence {
+  id       Int @id
+  revision Int @default(0)
+}
+
+model User {
+  id              String @id
+  name            String
+  role            String
+  createdAt       DateTime @default(now())
+  profile         AnswererProfile?
+  loginSessions   LoginSession[]
+  requests        QuestionRequest[]
+  askerSessions   AnswerSession[] @relation("AskerSessions")
+  answererSessions AnswerSession[] @relation("AnswererSessions")
+  messages        Message[]
+  attachments     Attachment[]
+  requesterLease  RequesterLease?
+  events          BusinessEvent[]
+}
+
+model LoginSession {
+  id        String @id @default(cuid())
+  tokenHash String @unique
+  userId    String
+  user      User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+  @@index([expiresAt])
+}
+
+model Subject {
+  id       String @id
+  name     String
+  profiles AnswererSubject[]
+  requests QuestionRequest[]
+}
+
+model AnswererProfile {
+  userId      String @id
+  user        User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  bio         String @default("")
+  enabled     Boolean @default(true)
+  isAdult     Boolean @default(true)
+  isFullTimeStudent Boolean @default(true)
+  isEmployed  Boolean @default(false)
+  profileSource String @default("DEMO")
+  online      Boolean @default(false)
+  heartbeatAt DateTime?
+  idleSince   DateTime @default(now())
+  subjects    AnswererSubject[]
+  invitations Invitation[]
+  lease       AnswererLease?
+}
+
+model AnswererSubject {
+  answererId String
+  subjectId  String
+  profile    AnswererProfile @relation(fields: [answererId], references: [userId], onDelete: Cascade)
+  subject    Subject @relation(fields: [subjectId], references: [id], onDelete: Cascade)
+  @@id([answererId, subjectId])
+}
+
+model QuestionRequest {
+  id               String @id @default(cuid())
+  askerId          String
+  asker            User @relation(fields: [askerId], references: [id])
+  subjectId        String
+  subject          Subject @relation(fields: [subjectId], references: [id])
+  description      String
+  mode             String
+  status           String @default("WAITING")
+  targetAnswererId  String?
+  attachmentId     String? @unique
+  attachment       Attachment? @relation(fields: [attachmentId], references: [id])
+  idempotencyKey   String
+  createdAt        DateTime @default(now())
+  deadlineAt       DateTime
+  matchedAt        DateTime?
+  endReason        String?
+  invitations      Invitation[]
+  session          AnswerSession?
+  requesterLease   RequesterLease?
+  answererLease    AnswererLease?
+  events           BusinessEvent[]
+  @@unique([askerId, idempotencyKey])
+  @@index([status, deadlineAt])
+}
+
+model RequesterLease {
+  askerId  String @id
+  asker    User @relation(fields: [askerId], references: [id], onDelete: Cascade)
+  requestId String @unique
+  request QuestionRequest @relation(fields: [requestId], references: [id], onDelete: Cascade)
+}
+
+model AnswererLease {
+  answererId String @id
+  profile    AnswererProfile @relation(fields: [answererId], references: [userId], onDelete: Cascade)
+  requestId  String @unique
+  request    QuestionRequest @relation(fields: [requestId], references: [id], onDelete: Cascade)
+  offerId    String? @unique
+  offer      Invitation? @relation(fields: [offerId], references: [id], onDelete: Cascade)
+  sessionId  String? @unique
+  session    AnswerSession? @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  expiresAt  DateTime?
+}
+
+model Invitation {
+  id         String @id @default(cuid())
+  requestId  String
+  request    QuestionRequest @relation(fields: [requestId], references: [id], onDelete: Cascade)
+  answererId String
+  profile    AnswererProfile @relation(fields: [answererId], references: [userId])
+  status     String @default("PENDING")
+  createdAt  DateTime @default(now())
+  deadlineAt DateTime
+  decidedAt  DateTime?
+  lease      AnswererLease?
+  @@unique([requestId, answererId])
+  @@index([status, deadlineAt])
+}
+
+model AnswerSession {
+  id                     String @id @default(cuid())
+  requestId              String @unique
+  request                QuestionRequest @relation(fields: [requestId], references: [id])
+  askerId                String
+  asker                  User @relation("AskerSessions", fields: [askerId], references: [id])
+  answererId             String
+  answerer               User @relation("AnswererSessions", fields: [answererId], references: [id])
+  createdAt              DateTime @default(now())
+  askerEnteredAt         DateTime?
+  answererEnteredAt      DateTime?
+  askerSeenAt            DateTime?
+  answererSeenAt         DateTime?
+  startedAt              DateTime?
+  endedAt                DateTime?
+  endReason              String?
+  rtcCleanupStatus       String @default("NONE")
+  rtcCleanupLastAttemptAt DateTime?
+  messages               Message[]
+  feedback               Feedback?
+  lease                  AnswererLease?
+  events                 BusinessEvent[]
+  @@index([endedAt])
+}
+
+model Message {
+  id        String @id @default(cuid())
+  sessionId String
+  session   AnswerSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  senderId  String
+  sender    User @relation(fields: [senderId], references: [id])
+  body      String
+  clientId  String
+  createdAt DateTime @default(now())
+  @@unique([sessionId, senderId, clientId])
+  @@index([sessionId, createdAt])
+}
+
+model Attachment {
+  id         String @id @default(cuid())
+  uploaderId String
+  uploader   User @relation(fields: [uploaderId], references: [id])
+  mime       String
+  bytes      Int
+  storageKey String @unique
+  createdAt  DateTime @default(now())
+  request    QuestionRequest?
+}
+
+model Feedback {
+  id         String @id @default(cuid())
+  sessionId  String @unique
+  session    AnswerSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  resolution String
+  rating     Int
+  comment    String @default("")
+  createdAt  DateTime @default(now())
+}
+
+model BusinessEvent {
+  id        String @id @default(cuid())
+  requestId String?
+  request   QuestionRequest? @relation(fields: [requestId], references: [id])
+  sessionId String?
+  session   AnswerSession? @relation(fields: [sessionId], references: [id])
+  actorId   String?
+  actor     User? @relation(fields: [actorId], references: [id])
+  kind      String
+  detail    String @default("")
+  createdAt DateTime @default(now())
+  @@index([requestId, createdAt])
+}
+
+model RateLimit {
+  id          String @id
+  bucket      String
+  windowStart DateTime
+  count       Int @default(1)
+}

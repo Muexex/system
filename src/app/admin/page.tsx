@@ -1,0 +1,25 @@
+"use client";
+
+import { useState } from "react";
+import { AuthGate, ErrorNotice, Loading, PageHeading } from "@/components/site-shell";
+import { messageOf, post, usePolling, type AdminData, type AdminUser, type Subject } from "@/lib/client";
+
+export default function AdminPage() { return <AuthGate role="ADMIN"><Admin /></AuthGate>; }
+function Admin() {
+  const poll = usePolling<AdminData>("/admin");
+  if (poll.loading && !poll.data) return <Loading text="正在读取真实平台统计…" />;
+  if (!poll.data) return <ErrorNotice error={poll.error || "无法读取管理数据。"} retry={() => void poll.refresh()} />;
+  const { stats, users, subjects } = poll.data;
+  const metrics = [{ name: "答疑请求", value: stats.requestCount, caption: "数据库中的全部测试请求" }, { name: "成功匹配", value: stats.matchedCount, caption: "答疑者实际接受的请求" }, { name: "已完成答疑", value: stats.completedCount, caption: "已结束的真实答疑会话" }, { name: "问题解决比例", value: stats.solvedRatio === null ? "—" : `${Math.round(stats.solvedRatio * 100)}%`, caption: `${stats.feedbackCount} 条反馈中的已解决比例` }];
+  return <><PageHeading eyebrow="管理员 · 真实数据概览" title="测试平台管理概览" description="汇总数据库中的匹配、答疑与反馈记录。" action={<a className="button secondary" href="/api/admin/export" download>导出汇总 CSV ↓</a>} /><ErrorNotice error={poll.error} retry={() => void poll.refresh()} /><div className="stats-grid">{metrics.map(metric => <div className="card stat-card" key={metric.name}><p>{metric.name}</p><div className="stat-value">{metric.value}</div><small>{metric.caption}</small></div>)}</div><div className="admin-layout"><section className="card"><div className="card-header"><h2>各科目请求</h2><small>全部请求</small></div>{stats.bySubject.length ? stats.bySubject.map(subject => <div className="bar-row" key={subject.id}><span className="bar-label">{subject.name}</span><div className="bar-track"><div className="bar-fill" style={{ width: `${stats.requestCount ? subject.count / stats.requestCount * 100 : 0}%` }} /></div><span className="bar-count">{subject.count}</span></div>) : <p className="caption">尚无请求记录</p>}</section><section className="card"><h2>匹配与等待</h2><div className="admin-metric"><span>平均匹配耗时</span><strong>{stats.averageMatchMs === null ? "暂无数据" : `${(stats.averageMatchMs / 1000).toFixed(1)} 秒`}</strong></div><div className="admin-metric"><span>等待超时</span><strong>{stats.expiredCount}</strong></div><div className="admin-metric"><span>主动取消</span><strong>{stats.cancelledCount}</strong></div><div className="admin-metric"><span>收到反馈</span><strong>{stats.feedbackCount}</strong></div></section></div><div className="section-title"><div><h2>测试账号与答疑范围</h2><p>全部资料均为虚构；不代表真实身份或认证。</p></div><span className="section-count">{users.length} 个账号</span></div><div className="card table-card"><table className="account-table"><thead><tr><th scope="col">测试账号</th><th scope="col">身份</th><th scope="col">启用状态</th><th scope="col">可答科目</th><th scope="col">操作</th></tr></thead><tbody>{users.map(user => <AccountRow key={`${user.id}:${user.enabled}:${user.subjects.map(s => s.id).join(",")}`} user={user} subjects={subjects} refresh={poll.refresh} />)}</tbody></table></div><div className="notice">CSV 仅包含汇总统计，不包含私人聊天、图片或身份材料。当前为单实例免费原型；正式认证、支付与公网运营不属于本次测试范围。</div></>;
+}
+function AccountRow({ user, subjects, refresh }: { user: AdminUser; subjects: Subject[]; refresh: () => Promise<void> }) {
+  const [enabled, setEnabled] = useState(user.enabled);
+  const [selected, setSelected] = useState(user.subjects.map(subject => subject.id));
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const [saved, setSaved] = useState(false);
+  const answerer = user.role === "ANSWERER";
+  async function save() { setBusy(true); setError(""); setSaved(false); try { await post(`/admin/answerers/${user.id}`, { enabled, subjectIds: selected }); setSaved(true); await refresh(); } catch (e) { setError(messageOf(e)); } finally { setBusy(false); } }
+  return <tr><td><strong>{user.name}</strong><div className="caption">虚构测试账号</div></td><td>{user.role === "ASKER" ? "提问者" : user.role === "ANSWERER" ? "答疑者" : "管理员"}</td><td>{answerer ? <label className="admin-toggle"><input type="checkbox" aria-label={`启用${user.name}`} checked={enabled} disabled={busy} onChange={e => { setEnabled(e.target.checked); setSaved(false); }} />{enabled ? "启用" : "停用"}</label> : <span className="caption">演示账号</span>}</td><td>{answerer ? <div className="checkbox-subjects">{subjects.map(subject => <label key={subject.id}><input type="checkbox" checked={selected.includes(subject.id)} disabled={busy} onChange={e => { setSelected(current => e.target.checked ? [...current, subject.id] : current.filter(id => id !== subject.id)); setSaved(false); }} />{subject.name}</label>)}</div> : <span className="caption">—</span>}</td><td>{answerer ? <><button className="button secondary small" onClick={() => void save()} disabled={busy} aria-label={`保存${user.name}设置`}>{busy ? "保存中…" : "保存设置"}</button>{error && <div className="caption" role="alert" style={{ color: "var(--red)", maxWidth: 130 }}>{error}</div>}{saved && <div className="status-note" role="status">已保存</div>}</> : <span className="caption">—</span>}</td></tr>;
+}

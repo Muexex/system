@@ -1,0 +1,36 @@
+"use client";
+
+import Link from "next/link";
+import Image from "next/image";
+import { use, useEffect, useRef, useState, type FormEvent } from "react";
+import { RtcPanel } from "@/components/rtc-panel";
+import { AuthGate, ErrorNotice, Loading, PageHeading, useAuth } from "@/components/site-shell";
+import { displayDate, duration, messageOf, newKey, post, useNow, usePolling, type Message, type Room } from "@/lib/client";
+
+type PendingMessage = { clientId: string; body: string; createdAt: string; status: "sending" | "failed"; error?: string };
+export default function RoomPage({ params }: { params: Promise<{ sessionId: string }> }) { const { sessionId } = use(params); return <AuthGate><RoomContent sessionId={sessionId} /></AuthGate>; }
+function RoomContent({ sessionId }: { sessionId: string }) {
+  const { user } = useAuth();
+  const poll = usePolling<{ session: Room }>(`/sessions/${sessionId}`);
+  const room = poll.data?.session;
+  const now = useNow();
+  const [body, setBody] = useState("");
+  const [pending, setPending] = useState<PendingMessage[]>([]);
+  const [error, setError] = useState("");
+  const [ending, setEnding] = useState(false);
+  const [entryError, setEntryError] = useState("");
+  const messagesEnd = useRef<HTMLDivElement>(null);
+  useEffect(() => { let active = true; post(`/sessions/${sessionId}/enter`).then(() => { if (active) setEntryError(""); }).catch(e => { if (active) setEntryError(messageOf(e)); }); return () => { active = false; }; }, [sessionId]);
+  useEffect(() => { if (room?.messages) setPending(current => current.filter(item => !room.messages.some(message => message.clientId === item.clientId))); }, [room?.messages]);
+  useEffect(() => { messagesEnd.current?.scrollIntoView({ block: "nearest" }); }, [room?.messages.length, pending.length]);
+  async function retryEnter() { try { await post(`/sessions/${sessionId}/enter`); setEntryError(""); await poll.refresh(); } catch (e) { setEntryError(messageOf(e)); } }
+  async function send(item: PendingMessage) { setPending(current => current.map(p => p.clientId === item.clientId ? { ...p, status: "sending", error: undefined } : p)); try { await post<{ message: Message }>(`/sessions/${sessionId}/messages`, { body: item.body, clientId: item.clientId }); await poll.refresh(); } catch (e) { setPending(current => current.map(p => p.clientId === item.clientId ? { ...p, status: "failed", error: messageOf(e) } : p)); } }
+  function submit(event: FormEvent) { event.preventDefault(); if (!body.trim() || !room || !room.startedAt || room.endedAt) return; const item: PendingMessage = { clientId: newKey(), body: body.trim(), createdAt: new Date().toISOString(), status: "sending" }; setPending(current => [...current, item]); setBody(""); void send(item); }
+  async function end() { setEnding(true); setError(""); try { await post(`/sessions/${sessionId}/end`); await poll.refresh(); } catch (e) { setError(messageOf(e)); } finally { setEnding(false); } }
+  if (poll.loading && !room) return <Loading text="正在恢复答疑室与消息…" />;
+  if (!room || !user) return <ErrorNotice error={poll.error || "无法进入此答疑室。"} retry={() => void poll.refresh()} />;
+  const other = user.id === room.askerId ? room.answerer : room.asker;
+  const elapsed = room.startedAt ? duration((room.endedAt ? Date.parse(room.endedAt) : now) - Date.parse(room.startedAt)) : "等待双方进入";
+  const ended = Boolean(room.endedAt);
+  return <><PageHeading title={ended ? "答疑交流记录" : "一起理清这个问题"} eyebrow={`${room.request.subject.name} · 临时一对一答疑室`} description="文字实时交流，任一方均可主动结束答疑。" action={!ended ? <button className="button danger" onClick={() => void end()} disabled={ending}>{ending ? "正在结束…" : "结束答疑"}</button> : <Link href="/history" className="button secondary">返回记录</Link>} /><ErrorNotice error={error || poll.error} retry={poll.error ? () => void poll.refresh() : undefined} /><ErrorNotice error={entryError} retry={() => void retryEnter()} />{ended && <div className="ended-banner"><div><strong>答疑已结束</strong><p>{room.endReason === "ABANDONED" ? "长时间无人返回，本次答疑已自动回收。" : "感谢这次交流。消息已保存，可以随时回来查看。"} 答疑时长 {elapsed}</p></div>{user.id === room.askerId && room.endReason !== "ABANDONED" && (room.feedback ? <span className="caption">反馈已提交 · {room.feedback.rating}/5 分</span> : <Link className="button primary" href={`/feedback/${room.id}`}>填写反馈</Link>)}</div>}<div className="room-layout"><section className="card chat-card" aria-label="文字答疑"><div className="chat-header"><span className="avatar small">{other.name.slice(-1)}</span><div><strong>{other.name}</strong><small>{ended ? "答疑已结束" : "双方消息实时同步"}</small></div><span className="timer">{elapsed}</span></div><div className="messages" role="log" aria-live="polite" aria-label="聊天记录">{!room.messages.length && !pending.length && <div className="chat-empty">{room.startedAt ? "双方已进入。把你的思路与疑问写下来，开始交流吧。" : "等待另一位伙伴进入答疑室，双方进入后开始文字交流。"}</div>}{room.messages.map(message => { const own = message.senderId === user.id; return <div className={`message-row ${own ? "own" : ""}`} key={message.id}><span className="avatar small" aria-hidden>{own ? "我" : other.name.slice(-1)}</span><div><p className="message-body">{message.body}</p><div className="message-time">{new Date(message.createdAt).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit", hour12: false })}</div></div></div>; })}{pending.map(item => <div className={`message-row own ${item.status}`} key={item.clientId}><span className="avatar small" aria-hidden>我</span><div><p className="message-body">{item.body}</p>{item.status === "failed" ? <div className="message-failure" role="alert"><span>{item.error || "消息发送失败"}</span><button disabled={ended} onClick={() => void send(item)}>重试发送</button></div> : <div className="message-time">正在发送…</div>}</div></div>)}<div ref={messagesEnd} /></div><form className="composer" onSubmit={submit}><label className="sr-only" htmlFor="message">消息</label><textarea id="message" aria-label="消息" value={body} onChange={e => setBody(e.target.value)} placeholder={ended ? "答疑已结束，不能继续发送消息" : !room.startedAt ? "等待双方进入后开始文字交流" : "写下你的疑问或思路…"} disabled={ended || !room.startedAt} maxLength={2000} rows={3} onKeyDown={e => { if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) { e.preventDefault(); submit(e); } }} /><div className="composer-footer"><small>{ended ? "交流记录已保留" : !room.startedAt ? "等待双方进入后即可发送消息" : "Ctrl / ⌘ + Enter 发送 · 最多 2000 字"}</small><button className="button primary" disabled={ended || !room.startedAt || !body.trim()} type="submit">发送消息 <span aria-hidden>↗</span></button></div></form></section><aside className="room-side"><section className="card original-question"><h3>这次的问题</h3><span className="tag">{room.request.subject.name}</span><span className="caption">{room.request.mode === "DIRECT" ? "指定答疑" : "快速匹配"}</span><p>{room.request.description}</p>{room.request.attachmentId && <a className="question-image-link" href={`/api/attachments/${room.request.attachmentId}`} target="_blank" rel="noreferrer"><Image className="question-image" src={`/api/attachments/${room.request.attachmentId}`} alt="提问者上传的题目图片，点击查看原图" width={600} height={400} unoptimized /></a>}<div className="divider" /><p className="caption" style={{ fontSize: 10 }}>开始 {displayDate(room.startedAt)}{ended && <><br />结束 {displayDate(room.endedAt)}</>}</p></section><RtcPanel sessionId={room.id} ended={ended} /></aside></div></>;
+}
