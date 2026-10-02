@@ -2,8 +2,10 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
+import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+const require = createRequire(import.meta.url);
 const dir = mkdtempSync(path.join(tmpdir(), 'yanban-e2e-'));
 writeFileSync(path.join(dir, 'test.db'), '', { flag: 'wx', mode: 0o600 });
 const testEnv = {
@@ -15,10 +17,12 @@ const testEnv = {
 };
 // Avoid conflicting runner color flags in child processes.
 delete testEnv.NO_COLOR;
-for (const args of [['prisma', 'migrate', 'deploy'], ['tsx', 'prisma/seed.ts']]) {
-  const result = spawnSync(process.platform === 'win32' ? 'npx.cmd' : 'npx', ['--no-install', ...args], {
+for (const [command, ...args] of [['prisma', 'migrate', 'deploy'], ['tsx', 'prisma/seed.ts']]) {
+  const cli = require.resolve(command === 'prisma' ? 'prisma/build/index.js' : 'tsx/cli');
+  const result = spawnSync(process.execPath, [cli, ...args], {
     cwd: root, env: testEnv, stdio: 'inherit'
   });
+  if (result.error) throw result.error;
   if (result.status !== 0) process.exit(result.status ?? 1);
 }
 const child = spawn(process.execPath, ['node_modules/next/dist/bin/next', 'dev', '--hostname', '0.0.0.0', '--port', '3100'], {

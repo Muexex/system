@@ -38,3 +38,13 @@ Playwright 使用两个隔离浏览器 Cookie 会话和真实应用后端，默�
 - 未进行公网部署、无持久化 Serverless 或多实例验证。SQLite 与附件需要单实例持久化磁盘。
 
 真实音视频配置和两人手工验收步骤见 [README.md](README.md)。文字答疑试用不需要第三方密钥。
+
+## Windows 初始化兼容性修复
+
+用户在 Node.js 24.21.0、Windows Git Bash 提供的日志确认，旧初始化入口在 `spawnSync npx.cmd EINVAL` 处失败，导致 Prisma Client 未生成。
+
+初始化与浏览器测试服务入口已改为当前 Node.js 直接执行本地 CLI，不使用 `.cmd` 子进程；开发启动增加 `predev` 初始化检查。项目 npm 缓存恢复平台默认位置，云安装脚本单独指定可写缓存目录。
+
+修复后在当前 Linux 环境通过 lint、类型检查与5项浏览器流程。另以带空格路径的独立临时项目验证首次生成、迁移、seed及重复初始化，账号6个、科目4个、答疑者3个且全部离线，已有事件和 `.env` 设置均保留；`npm run dev -- --help` 实际触发初始化前置流程。未重置用户数据库。
+
+此环境没有 Windows 执行能力，修复后的 Windows 首次启动尚需用户拉取更新后确认；不把 Linux 路径验收描述为 Windows 实测。

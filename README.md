@@ -17,6 +17,18 @@ npm run dev
 
 浏览器本地访问 `http://localhost:3000`，进入 `/login`。首次 `setup` 自动从 `.env.example` 创建无密钥 `.env`、创建数据库及上传目录、生成 Prisma Client、执行已有迁移并 seed。可以反复运行；仅新增缺失测试账号与科目，不清空答疑记录、不覆盖已有 `.env` 或管理员设置。没有自动 `reset`。
 
+`npm run dev` 会先自动执行同样的初始化检查；初始化失败时不会继续启动一个缺少数据库客户端的服务。脚本使用当前 Node.js 直接执行已安装的 Prisma/tsx CLI，兼容 Windows Git Bash，不通过 `npx.cmd` 子进程启动。npm 缓存使用本机默认位置。
+
+Windows 遇到 `spawnSync npx.cmd EINVAL`，或浏览器提示找不到 `../generated/prisma/client` 时，先按 `Ctrl+C` 停止服务，在项目目录逐条执行：
+
+```bash
+git pull --ff-only
+npm run setup
+npm run dev
+```
+
+看到“初始化完成”后再打开登录页。如果初始化仍报错，先处理该错误；不要继续启动，也不需要删除数据库或升级 npm。
+
 也可以手动准备配置和初始化：
 
 ```bash
