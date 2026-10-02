@@ -6,7 +6,7 @@
 
 ## 快速开始
 
-建议 **Node.js 24 LTS**（当前开发验证版本 24.19.0）；也支持 Node.js 22.13+。采用 npm 与提交的 `package-lock.json`。
+使用 **Node.js 22 LTS**，建议 **22.23.3**（支持22.13+的22.x版本）。采用 npm 与提交的 `package-lock.json`。当前不支持 Node.js 24：原生模块垃圾回收清理兼容问题可能使 SQLite 驱动直接终止进程。
 
 ```bash
 cd /workspace/system   # 其他机器改成仓库所在目录
@@ -28,6 +28,10 @@ npm run dev
 ```
 
 看到“初始化完成”后再打开登录页。如果初始化仍报错，先处理该错误；不要继续启动，也不需要删除数据库或升级 npm。
+
+若服务短暂运行后出现 `RemoveEnvironmentCleanupHook`、`Assertion failed: (env) != nullptr` 和 `Statement` 原生堆栈，请切换到 Node.js 22 LTS。相关上游报告见 [nodejs/node#65446](https://github.com/nodejs/node/issues/65446) 与 [better-sqlite3#1515](https://github.com/WiseLibs/better-sqlite3/issues/1515)；仅改用生产模式或关闭热更新不能证明已消除该运行时缺陷。
+
+Windows 操作：在设置的“已安装的应用”中卸载当前 Node.js，使用官方 [Node.js 22.23.3 x64 安装包](https://nodejs.org/dist/v22.23.3/node-v22.23.3-x64.msi) 安装22版本，关闭并重新打开 Git Bash。先确认 `node -v` 为 `v22.23.3`，再在项目目录执行 `git pull --ff-only`、`npm ci`、`npm run dev`。切换 Node 主版本后必须重新安装依赖，使 SQLite 等原生模块匹配新运行时；不删除 `.env`、数据库或附件。
 
 也可以手动准备配置和初始化：
 

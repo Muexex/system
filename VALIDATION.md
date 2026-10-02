@@ -1,6 +1,6 @@
 # 验证记录
 
-验证日期：2026-10-02。执行环境：Node.js 24.19.0、npm 11.9.0、Debian 系统 Chromium 151.0.7922.173。
+验证日期：2026-10-02。最新复验环境：Node.js 22.23.3、npm 10.9.9、Debian 系统 Chromium 151.0.7922.173。早期 Node.js 24 验收不代表原生模块回收缺陷已解决，当前支持范围已改为22 LTS。
 
 | 检查 | 实际结果 |
 | --- | --- |
@@ -9,7 +9,7 @@
 | `npm run lint` | 通过，无 lint 错误或警告 |
 | `npm run typecheck` | 通过 |
 | `npm test` | 44/44 通过：业务 24、API 安全 14、RTC 接口模拟 6 |
-| `npm run test:e2e` | 5/5 通过，最终运行耗时 58.6 秒 |
+| `npm run test:e2e` | 5/5 通过，Node.js 22 最终复验耗时约1分钟 |
 | `npm run build` | 通过，所有页面和 Node API 构建成功，无构建警告 |
 | 本地生产启动 | 通过；localhost 与 127.0.0.1 登录均返回 200，数据库科目接口正常 |
 | 响应式验收 | 桌面 1440 与手机 390 页面可用；手机答疑者可答科目可见，无横向溢出；主要按钮至少 44px 高 |
@@ -48,3 +48,13 @@ Playwright 使用两个隔离浏览器 Cookie 会话和真实应用后端，默�
 修复后在当前 Linux 环境通过 lint、类型检查与5项浏览器流程。另以带空格路径的独立临时项目验证首次生成、迁移、seed及重复初始化，账号6个、科目4个、答疑者3个且全部离线，已有事件和 `.env` 设置均保留；`npm run dev -- --help` 实际触发初始化前置流程。未重置用户数据库。
 
 此环境没有 Windows 执行能力，修复后的 Windows 首次启动尚需用户拉取更新后确认；不把 Linux 路径验收描述为 Windows 实测。
+
+## Node.js 24 原生模块回收崩溃
+
+用户随后提供的 Windows 日志确认初始化已成功，但进程在 SQLite `Statement` 回收时触发 `RemoveEnvironmentCleanupHook` 的 `(env) != nullptr` 断言。堆栈与 [Node.js上游问题#65446](https://github.com/nodejs/node/issues/65446) 和 [better-sqlite3报告#1515](https://github.com/WiseLibs/better-sqlite3/issues/1515) 吻合。
+
+核对官方源码：24.21.0 的 `node::ObjectWrap` 包含该清理钩子注册/删除路径，22.23.3 不包含。项目 `.nvmrc`、engines与文档已改为22 LTS；初始化、构建及生产启动增加版本检查，防止在不支持的运行时继续启动。没有改动业务状态机或更换数据库方案。
+
+通过官方 SHA-256 校验安装 Linux Node.js 22.23.3，重新按锁文件安装原生依赖后，实际运行 `npm run check`：lint、类型检查、44项Vitest、5项Playwright和生产构建全部通过。另以独立内存数据库进行30万次准备/执行语句和分配触发的垃圾回收，进程正常完成；原有数据库、附件与环境文件未清空。
+
+这些结果为 Linux 有限时验证，不能代替 Windows 长时间运行验收。Windows 用户需安装22 LTS、重新打开终端，并执行 `npm ci` 重装原生依赖后再确认稳定性；仅降级运行时而沿用24版本的原生依赖不足以完成修复。

@@ -1,3 +1,4 @@
+import './check-node.mjs';
 import { existsSync, copyFileSync, mkdirSync, writeFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { createRequire } from 'node:module';
