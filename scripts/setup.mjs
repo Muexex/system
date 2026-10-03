@@ -11,7 +11,7 @@ process.chdir(root);
 if (!existsSync('.env')) { copyFileSync('.env.example', '.env'); console.log('已创建本地 .env（无真实凭据）。'); }
 config({ path: '.env', quiet: true });
 const url = process.env.DATABASE_URL ?? 'file:./data/dev.db';
-if (!url.startsWith('file:')) throw new Error('此原型只支持 SQLite file: 数据库');
+if (!url.startsWith('file:')) throw new Error('当前服务只支持 SQLite file: 数据库');
 const dbFile = path.resolve(root, url.slice(5));
 mkdirSync(path.dirname(dbFile), { recursive: true });
 if (!existsSync(dbFile)) writeFileSync(dbFile, '', { flag: 'wx', mode: 0o600 });

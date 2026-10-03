@@ -5,7 +5,8 @@ import { join } from "node:path";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { createDb } from "@/server/db";
 import { createDomain } from "@/server/domain";
-import { seedDatabase } from "../prisma/seed";
+import { fixturePassword, seedDatabase } from "../prisma/seed";
+import { verifyPassword } from "@/server/credentials";
 import { migratedTestDatabase } from "./isolated-db";
 
 const problem = "请帮我解释这道考研数学极限题的推导过程，并说明适用条件。";
@@ -49,7 +50,7 @@ async function room() {
 beforeAll(async () => {
   template = await migratedTestDatabase();
   const initial = createDb(template.url);
-  await seedDatabase(initial);
+  await seedDatabase(initial, { fixtures: true });
   await initial.$disconnect();
 });
 
@@ -77,8 +78,8 @@ afterAll(async () => { await template?.cleanup(); });
 
 describe("database-backed matching and presence", () => {
   it("seeds reproducibly, and every test answerer starts offline", async () => {
-    await seedDatabase(database);
-    await seedDatabase(database);
+    await seedDatabase(database, { fixtures: true });
+    await seedDatabase(database, { fixtures: true });
     expect(await database.user.count()).toBe(6);
     expect(await database.subject.count()).toBe(4);
     expect(await database.answererProfile.count({ where: { online: true } })).toBe(0);
@@ -379,5 +380,149 @@ describe("authorization, ended-room rules and real reporting", () => {
     expect(stats.bySubject.find((x) => x.id === "math")?.count).toBe(1);
     expect((await service.history("asker-b"))).toHaveLength(0);
     expect((await service.history("asker-a"))).toHaveLength(1);
+  });
+});
+
+
+describe("formal account persistence and legacy isolation", () => {
+  it("normal seed only adds subjects and never creates or resets credentials", async () => {
+    const empty = await migratedTestDatabase();
+    const fresh = createDb(empty.url);
+    try {
+      await seedDatabase(fresh);
+      await seedDatabase(fresh);
+      expect(await fresh.subject.count()).toBe(4);
+      expect(await fresh.user.count()).toBe(0);
+      expect(await fresh.studentAccount.count()).toBe(0);
+      expect(await fresh.teacherAccount.count()).toBe(0);
+      expect(await fresh.adminAccount.count()).toBe(0);
+      await fresh.user.create({ data: { id: "existing-legacy", name: "旧记录", role: "ASKER" } });
+      await seedDatabase(fresh);
+      expect((await fresh.user.findUniqueOrThrow({ where: { id: "existing-legacy" } })).name).toBe("旧记录");
+      expect(await fresh.loginSession.count()).toBe(0);
+      await seedDatabase(fresh, { fixtures: "admin" });
+      expect(await fresh.adminAccount.count()).toBe(1);
+      expect(await fresh.studentAccount.count()).toBe(0);
+      expect(await fresh.teacherAccount.count()).toBe(0);
+      expect(await fresh.answererProfile.count()).toBe(0);
+      expect(await fresh.user.count()).toBe(2);
+    } finally { await fresh.$disconnect(); await empty.cleanup(); }
+  });
+
+  it("fixture credentials are hashed, reproducible and separated by account namespace", async () => {
+    const before = await database.studentAccount.findUniqueOrThrow({ where: { userId: "asker-a" } });
+    expect(before.passwordHash).not.toBe(fixturePassword);
+    expect(await verifyPassword(fixturePassword, before.passwordHash)).toBe(true);
+    await seedDatabase(database, { fixtures: true });
+    expect((await database.studentAccount.findUniqueOrThrow({ where: { userId: "asker-a" } })).passwordHash).toBe(before.passwordHash);
+    await database.studentAccount.update({ where: { userId: "asker-a" }, data: { username: "same-name" } });
+    await database.teacherAccount.update({ where: { userId: "answerer-a" }, data: { username: "same-name" } });
+    expect((await database.studentAccount.findUniqueOrThrow({ where: { username: "same-name" } })).userId).toBe("asker-a");
+    expect((await database.teacherAccount.findUniqueOrThrow({ where: { username: "same-name" } })).userId).toBe("answerer-a");
+    const admin = await service.adminData("admin");
+    expect(admin.studentAccounts).toHaveLength(2);
+    expect(admin.teacherAccounts).toHaveLength(3);
+    expect(JSON.stringify(admin)).not.toContain("passwordHash");
+    expect(JSON.stringify(admin)).not.toContain(before.passwordHash);
+  });
+
+  it("legacy demo identities are excluded from catalog, scheduling and statistics without deleting records", async () => {
+    await database.user.create({ data: { id: "legacy-answerer", name: "旧测试教师", role: "ANSWERER",
+      profile: { create: { enabled: true, profileSource: "DEMO", online: true, heartbeatAt: new Date(timestamp),
+        subjects: { create: { subjectId: "math" } } } } } });
+    await database.user.create({ data: { id: "legacy-asker", name: "旧测试学生", role: "ASKER" } });
+    const old = await database.questionRequest.create({ data: { askerId: "legacy-asker", subjectId: "math",
+      description: problem, mode: "QUICK", idempotencyKey: randomUUID(), deadlineAt: new Date(timestamp + 1000) } });
+    await online();
+    const catalog = await service.catalog();
+    expect(catalog.answerers.some(a => a.id === "legacy-answerer")).toBe(false);
+    expect(await database.invitation.count({ where: { requestId: old.id } })).toBe(0);
+    expect(await database.answererLease.count()).toBe(0);
+    const admin = await service.adminData("admin");
+    expect(admin.users.some(a => a.id.startsWith("legacy-"))).toBe(false);
+    expect(admin.stats.requestCount).toBe(0);
+    expect(await database.questionRequest.count()).toBe(1);
+    await expect(service.createRequest("legacy-asker", { subjectId: "math", description: problem,
+      mode: "QUICK", idempotencyKey: randomUUID() })).rejects.toMatchObject({ code: "FORMAL_ACCOUNT_REQUIRED" });
+  });
+
+  it("a pending teacher cannot come online or receive invitations before administrator review", async () => {
+    await database.answererProfile.update({ where: { userId: "answerer-a" }, data: { enabled: false } });
+    await expect(service.setPresence("answerer-a", true)).rejects.toMatchObject({ code: "DISABLED" });
+    const waiting = await request({ mode: "QUICK", targetAnswererId: undefined });
+    expect(waiting.status).toBe("WAITING");
+    expect(await database.invitation.count()).toBe(0);
+    await service.updateAnswerer("admin", "answerer-a", { enabled: true, subjectIds: ["math"] });
+    await service.setPresence("answerer-a", true);
+    expect((await service.getRequest("asker-a", waiting.id)).status).toBe("OFFERED");
+    expect((await pending(waiting.id)).answererId).toBe("answerer-a");
+  });
+
+  it("missing self-declaration prevents matching and administrator enablement", async () => {
+    await database.teacherAccount.update({ where: { userId: "answerer-a" }, data: { qualificationConfirmedAt: null } });
+    await database.answererProfile.update({ where: { userId: "answerer-a" }, data: { online: true, heartbeatAt: new Date(timestamp) } });
+    expect((await service.catalog()).answerers.some(a => a.id === "answerer-a")).toBe(false);
+    await expect(service.updateAnswerer("admin", "answerer-a", { enabled: true, subjectIds: ["math"] })).rejects.toMatchObject({ code: "QUALIFICATION_REQUIRED" });
+    const waiting = await request({ mode: "QUICK", targetAnswererId: undefined });
+    expect(waiting.status).toBe("WAITING");
+  });
+});
+
+
+describe("teacher profile review transactions", () => {
+  it("qualification and subject changes revoke review and release pending invitations atomically", async () => {
+    await online();
+    const question = await request();
+    const update = await service.updateTeacherProfile("answerer-a", { university: "变更后的学校", subjectIds: ["english"] });
+    expect(update.reviewRequired).toBe(true);
+    expect(update.profile.enabled).toBe(false);
+    expect(update.profile.status).toBe("OFFLINE");
+    expect((await service.getRequest("asker-a", question.id)).status).toBe("DECLINED");
+    expect(await database.answererLease.count()).toBe(0);
+    expect(await database.requesterLease.count()).toBe(0);
+    expect((await database.teacherAccount.findUniqueOrThrow({ where: { userId: "answerer-a" } })).university).toBe("变更后的学校");
+    expect((await database.answererSubject.findMany({ where: { answererId: "answerer-a" } })).map(s => s.subjectId)).toEqual(["english"]);
+    await expect(service.setPresence("answerer-a", true)).rejects.toMatchObject({ code: "DISABLED" });
+  });
+
+  it("sensitive profile changes preserve an ongoing session while preventing new invitations", async () => {
+    const { sessionId } = await room();
+    await service.enterSession("asker-a", sessionId);
+    await service.enterSession("answerer-a", sessionId);
+    await service.updateTeacherProfile("answerer-a", { bio: "新的擅长方向" });
+    expect((await service.getSession("answerer-a", sessionId)).endedAt).toBeNull();
+    expect((await database.answererLease.findUniqueOrThrow({ where: { answererId: "answerer-a" } })).sessionId).toBe(sessionId);
+    await service.sendMessage("answerer-a", sessionId, { body: "当前答疑继续", clientId: randomUUID() });
+    await service.endSession("asker-a", sessionId);
+    expect(await database.answererLease.count()).toBe(0);
+    expect((await service.catalog()).answerers.some(a => a.id === "answerer-a")).toBe(false);
+  });
+
+  it("unchanged profile fields and display-name changes preserve approval", async () => {
+    await online();
+    const profile = await database.teacherAccount.findUniqueOrThrow({ where: { userId: "answerer-a" } });
+    const same = await service.updateTeacherProfile("answerer-a", { university: profile.university, degree: profile.degree!, major: profile.major, subjectIds: ["math"] });
+    expect(same.reviewRequired).toBe(false);
+    const renamed = await service.updateTeacherProfile("answerer-a", { displayName: "新的教师昵称" });
+    expect(renamed.reviewRequired).toBe(false);
+    expect(renamed.profile.enabled).toBe(true);
+    expect(renamed.profile.name).toBe("新的教师昵称");
+    expect((await database.teacherAccount.findUniqueOrThrow({ where: { userId: "answerer-a" } })).displayName).toBe("新的教师昵称");
+    await expect(service.updateTeacherProfile("asker-a", { displayName: "越权昵称" })).rejects.toMatchObject({ status: 403 });
+  });
+
+  it("profile revocation racing invitation acceptance cannot leave a ghost or stranded lease", async () => {
+    await online();
+    const question = await request();
+    const offer = await pending(question.id);
+    await Promise.allSettled([
+      service.updateTeacherProfile("answerer-a", { degree: "DOCTORATE" }),
+      competingService.acceptOffer("answerer-a", offer.id),
+    ]);
+    const state = await database.questionRequest.findUniqueOrThrow({ where: { id: question.id } });
+    expect(["MATCHED", "DECLINED"]).toContain(state.status);
+    expect(await database.answerSession.count()).toBe(state.status === "MATCHED" ? 1 : 0);
+    expect(await database.answererLease.count()).toBe(state.status === "MATCHED" ? 1 : 0);
+    expect((await database.answererProfile.findUniqueOrThrow({ where: { userId: "answerer-a" } })).enabled).toBe(false);
   });
 });

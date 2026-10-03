@@ -1,9 +1,11 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import { usePathname } from "next/navigation";
 
 export type Role = "ASKER" | "ANSWERER" | "ADMIN";
-export interface User { id: string; name: string; role: Role }
+export type Portal = "student" | "teacher" | "admin";
+export interface User { id: string; name: string; role: Role; portal?: Portal }
 export interface Subject { id: string; name: string }
 export interface Answerer { id: string; name: string; bio: string; subjects: Subject[]; status: "AVAILABLE" | "BUSY" | "OFFLINE"; enabled: boolean; online?: boolean }
 export interface Catalog { subjects: Subject[]; answerers: Answerer[]; onlineCount: number; config: { waitMs: number; offerMs: number; heartbeatMs: number; pollMs: number } }
@@ -20,9 +22,21 @@ export interface AdminData { stats: Stats; users: AdminUser[]; subjects: Subject
 
 export class ApiError extends Error { constructor(message: string, public status: number, public code?: string, public requestId?: string) { super(message); } }
 
+export function portalForPath(pathname: string): Portal {
+  if (pathname === "/admin" || pathname.startsWith("/admin/")) return "admin";
+  if (pathname === "/teacher" || pathname.startsWith("/teacher/")) return "teacher";
+  return "student";
+}
+export function currentPortal(): Portal { return portalForPath(typeof window === "undefined" ? "/" : window.location.pathname); }
+export function portalPath(portal: Portal, path = "") { return `/${portal}${path ? `/${path.replace(/^\/+/, "")}` : ""}`; }
+export function attachmentUrl(id: string, portal: Portal = currentPortal()) { return `/api/attachments/${encodeURIComponent(id)}?portal=${portal}`; }
+
 export async function api<T>(path: string, options: RequestInit = {}): Promise<T> {
   let response: Response;
-  try { response = await fetch(`/api${path}`, { ...options, cache: "no-store", credentials: "same-origin", headers: { ...(options.body instanceof FormData ? {} : { "Content-Type": "application/json" }), ...options.headers } }); }
+  const headers = new Headers(options.headers);
+  if (!(options.body instanceof FormData) && !headers.has("Content-Type")) headers.set("Content-Type", "application/json");
+  if (!headers.has("X-Yanban-Portal")) headers.set("X-Yanban-Portal", currentPortal());
+  try { response = await fetch(`/api${path}`, { ...options, cache: "no-store", credentials: "same-origin", headers }); }
   catch { throw new ApiError("网络连接中断，请检查网络后重试。", 0); }
   const data = await response.json().catch(() => null);
   if (!response.ok) throw new ApiError(data?.error || "操作未成功，请稍后重试。", response.status, data?.code, data?.requestId);
@@ -33,10 +47,11 @@ export function messageOf(error: unknown) { return error instanceof Error ? erro
 export function newKey() { return crypto.randomUUID(); }
 export function displayDate(value: string | null) { return value ? new Date(value).toLocaleString("zh-CN", { hour12: false }) : "尚未开始"; }
 export function duration(ms: number) { const s = Math.max(0, Math.floor(ms / 1000)); return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`; }
-export const statusLabels: Record<string, string> = { WAITING: "等待在线答疑者", OFFERED: "已向答疑者发出邀请", MATCHED: "答疑者已接受", IN_PROGRESS: "答疑进行中", COMPLETED: "答疑已结束", CANCELLED: "请求已取消", EXPIRED: "等待超时", DECLINED: "指定答疑者拒绝了请求" };
+export const statusLabels: Record<string, string> = { WAITING: "等待在线教师", OFFERED: "已向教师发出邀请", MATCHED: "教师已接受", IN_PROGRESS: "答疑进行中", COMPLETED: "答疑已结束", CANCELLED: "请求已取消", EXPIRED: "等待超时", DECLINED: "指定教师拒绝了请求" };
 export const resolutionLabels = { SOLVED: "已解决", PARTIAL: "部分解决", UNSOLVED: "未解决" };
 
 export function usePolling<T>(path: string | null, interval = 2000) {
+  const portal = portalForPath(usePathname());
   const [data, setData] = useState<T | null>(null);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(true);
@@ -49,10 +64,10 @@ export function usePolling<T>(path: string | null, interval = 2000) {
     const attempt = generation.current;
     busy.current = true;
     controller.current = new AbortController();
-    try { const next = await api<T>(path, { signal: controller.current.signal }); if (alive.current && attempt === generation.current) { setData(next); setError(""); } }
+    try { const next = await api<T>(path, { signal: controller.current.signal, headers: { "X-Yanban-Portal": portal } }); if (alive.current && attempt === generation.current) { setData(next); setError(""); } }
     catch (e) { if (alive.current && attempt === generation.current) setError(messageOf(e)); }
     finally { if (attempt === generation.current) { busy.current = false; if (alive.current) setLoading(false); } }
-  }, [path]);
+  }, [path, portal]);
   useEffect(() => { generation.current += 1; busy.current = false; alive.current = true; setLoading(Boolean(path)); setData(null); setError(""); void refresh(); const timer = interval > 0 ? setInterval(() => void refresh(), interval) : null; return () => { alive.current = false; generation.current += 1; busy.current = false; controller.current?.abort(); if (timer) clearInterval(timer); }; }, [refresh, interval, path]);
   return { data, error, loading, refresh };
 }

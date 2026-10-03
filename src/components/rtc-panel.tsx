@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import { api } from "@/lib/client";
 import { createRtcClient, type RtcClient, type RtcConfiguration, type RtcConnectionState, type RtcMediaTile } from "@/lib/rtc-client";
 
 function MediaTile({ tile }: { tile: RtcMediaTile }) {
@@ -64,11 +65,11 @@ export function RtcPanel({ sessionId, ended }: { sessionId: string; ended: boole
       const oldClient = client.current;
       client.current = null;
       await oldClient?.disconnect();
-      const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/rtc`, { cache: "no-store", credentials: "same-origin" });
-      const result: RtcConfiguration & { error?: string } = await response.json();
-      if (!response.ok) {
-        if (typeof result.error === "string") safeErrorMessage = result.error;
-        throw new Error(safeErrorMessage);
+      let result: RtcConfiguration;
+      try { result = await api<RtcConfiguration>(`/sessions/${encodeURIComponent(sessionId)}/rtc`); }
+      catch (error) {
+        if (error instanceof Error) safeErrorMessage = error.message;
+        throw error;
       }
       if (!active.current || attempt !== generation.current) return;
       setProvider(result.provider);

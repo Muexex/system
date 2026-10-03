@@ -11,7 +11,7 @@ export type CreateRequestInput = {
 };
 const active = ['WAITING', 'OFFERED', 'MATCHED', 'IN_PROGRESS'];
 const requestInclude = { subject: true, session: { select: { id: true } } } as const;
-const profileInclude = { user: true, subjects: { include: { subject: true } }, lease: true } as const;
+const profileInclude = { user: { include: { teacherAccount: { select: { qualificationConfirmedAt: true, university: true, degree: true } } } }, subjects: { include: { subject: true } }, lease: true } as const;
 const roomInclude = {
   asker: true, answerer: true, request: { include: requestInclude },
   messages: { orderBy: [{ createdAt: 'asc' }, { id: 'asc' }] }, feedback: true,
@@ -93,9 +93,11 @@ export class Domain {
     }
   }
   private async user(tx: Tx, id: string, role?: string) {
-    const user = await tx.user.findUnique({ where: { id } });
+    const user = await tx.user.findUnique({ where: { id }, include: { studentAccount: { select: { userId: true } }, teacherAccount: { select: { userId: true } }, adminAccount: { select: { userId: true } } } });
     if (!user) fail('请先登录', 401, 'UNAUTHENTICATED');
     if (role && user.role !== role) fail('当前账号没有操作权限', 403, 'FORBIDDEN');
+    const formal = user.role === 'ASKER' ? user.studentAccount : user.role === 'ANSWERER' ? user.teacherAccount : user.role === 'ADMIN' ? user.adminAccount : null;
+    if (!formal) fail('请使用正式账号登录', 403, 'FORMAL_ACCOUNT_REQUIRED');
     return user;
   }
   private async event(tx: Tx, kind: string, now: Date, refs: { requestId?: string; sessionId?: string; actorId?: string; detail?: string } = {}) {
@@ -147,10 +149,10 @@ export class Domain {
     await this.schedule(tx, now);
   }
   private available(now: Date) {
-    return { enabled: true, isAdult: true, isFullTimeStudent: true, isEmployed: false, online: true, heartbeatAt: { gt: new Date(now.getTime() - this.settings.heartbeatTtlMs) }, lease: { is: null } };
+    return { enabled: true, profileSource: 'SELF_DECLARED', user: { teacherAccount: { is: { qualificationConfirmedAt: { not: null } } } }, isAdult: true, isFullTimeStudent: true, isEmployed: false, online: true, heartbeatAt: { gt: new Date(now.getTime() - this.settings.heartbeatTtlMs) }, lease: { is: null } };
   }
   private async schedule(tx: Tx, now: Date) {
-    const requests = await tx.questionRequest.findMany({ where: { status: 'WAITING', deadlineAt: { gt: now } }, orderBy: [{ createdAt: 'asc' }, { id: 'asc' }] });
+    const requests = await tx.questionRequest.findMany({ where: { status: 'WAITING', deadlineAt: { gt: now }, asker: { studentAccount: { isNot: null } } }, orderBy: [{ createdAt: 'asc' }, { id: 'asc' }] });
     for (const request of requests) {
       const tried = await tx.invitation.findMany({ where: { requestId: request.id }, select: { answererId: true } });
       const excluded = [request.askerId, ...tried.map(i => i.answererId)];
@@ -168,14 +170,14 @@ export class Domain {
     }
   }
   private card(profile: FullProfile, now: Date) {
-    const live = profile.enabled && profile.isAdult && profile.isFullTimeStudent && !profile.isEmployed && profile.online && !!profile.heartbeatAt && profile.heartbeatAt.getTime() + this.settings.heartbeatTtlMs > now.getTime();
+    const live = profile.enabled && profile.profileSource === 'SELF_DECLARED' && !!profile.user.teacherAccount?.qualificationConfirmedAt && profile.isAdult && profile.isFullTimeStudent && !profile.isEmployed && profile.online && !!profile.heartbeatAt && profile.heartbeatAt.getTime() + this.settings.heartbeatTtlMs > now.getTime();
     return { id: profile.userId, name: profile.user.name, bio: profile.bio, enabled: profile.enabled, online: live, subjects: profile.subjects.map(s => s.subject), status: !live ? 'OFFLINE' : profile.lease ? 'BUSY' : 'AVAILABLE' };
   }
   async reconcile() { return this.transaction(async () => undefined); }
   async catalog() {
     return this.transaction(async (tx, now) => {
       const subjects = await tx.subject.findMany({ orderBy: { id: 'asc' } });
-      const profiles = await tx.answererProfile.findMany({ where: { enabled: true }, include: profileInclude, orderBy: { userId: 'asc' } });
+      const profiles = await tx.answererProfile.findMany({ where: { enabled: true, profileSource: 'SELF_DECLARED', user: { teacherAccount: { is: { qualificationConfirmedAt: { not: null } } } } }, include: profileInclude, orderBy: { userId: 'asc' } });
       const answerers = profiles.map(p => this.card(p, now));
       return { subjects, answerers, onlineCount: answerers.filter(a => a.status !== 'OFFLINE').length, config: { waitMs: this.settings.waitMs, offerMs: this.settings.offerMs, heartbeatMs: this.settings.heartbeatMs, pollMs: this.settings.pollMs } };
     });
@@ -194,9 +196,9 @@ export class Domain {
       if (await tx.requesterLease.findUnique({ where: { askerId: userId } })) fail('您已有一个未结束的请求，请先处理', 409, 'ACTIVE_REQUEST');
       if (!await tx.subject.findUnique({ where: { id: input.subjectId } })) fail('科目不存在');
       if (input.mode === 'DIRECT') {
-        if (!input.targetAnswererId || input.targetAnswererId === userId) fail('请选择有效的答疑者');
+        if (!input.targetAnswererId || input.targetAnswererId === userId) fail('请选择有效的教师');
         const target = await tx.answererProfile.findFirst({ where: { userId: input.targetAnswererId, ...this.available(now), subjects: { some: { subjectId: input.subjectId } } } });
-        if (!target) fail('该答疑者当前不可接单或不支持所选科目', 409, 'ANSWERER_UNAVAILABLE');
+        if (!target) fail('该教师当前不可接单或不支持所选科目', 409, 'ANSWERER_UNAVAILABLE');
       }
       if (input.attachmentId) {
         const attachment = await tx.attachment.findUnique({ where: { id: input.attachmentId }, include: { request: true } });
@@ -234,8 +236,8 @@ export class Domain {
     return this.transaction(async (tx, now) => {
       await this.user(tx, userId, 'ANSWERER');
       const profile = await tx.answererProfile.findUnique({ where: { userId } });
-      if (!profile) fail('答疑者资料不存在', 404);
-      if (online && !profile.enabled) fail('该测试答疑者已停用', 403, 'DISABLED');
+      if (!profile) fail('教师资料不存在', 404);
+      if (online && (!profile.enabled || profile.profileSource !== 'SELF_DECLARED')) fail('教师账号尚未启用，请等待管理员审核', 403, 'DISABLED');
       const wasLive = profile.online && profile.heartbeatAt && profile.heartbeatAt.getTime() + this.settings.heartbeatTtlMs > now.getTime();
       await tx.answererProfile.update({ where: { userId }, data: { online, heartbeatAt: online ? now : null, ...(online && !wasLive ? { idleSince: now } : {}) } });
       // Voluntary offline releases a pending invitation, but never completes an ongoing session.
@@ -267,13 +269,13 @@ export class Domain {
   async acceptOffer(userId: string, offerId: string) {
     return this.transaction(async (tx, now) => {
       await this.user(tx, userId, 'ANSWERER');
-      const offer = await tx.invitation.findUnique({ where: { id: offerId }, include: { request: { include: { session: true } }, profile: true } });
+      const offer = await tx.invitation.findUnique({ where: { id: offerId }, include: { request: { include: { session: true } }, profile: { include: { user: { include: { teacherAccount: { select: { qualificationConfirmedAt: true } } } } } } } });
       if (!offer) fail('邀请不存在', 404, 'NOT_FOUND');
       if (offer.answererId !== userId) fail('无权接受此邀请', 403, 'FORBIDDEN');
       if (offer.status === 'ACCEPTED' && offer.request.session?.answererId === userId) return { sessionId: offer.request.session.id };
       const lease = await tx.answererLease.findUnique({ where: { answererId: userId } });
       if (offer.status !== 'PENDING' || offer.request.status !== 'OFFERED' || offer.deadlineAt <= now || offer.request.deadlineAt <= now || lease?.offerId !== offer.id) fail('邀请已失效', 409, 'STATE_CONFLICT');
-      if (!offer.profile.enabled || !offer.profile.isAdult || !offer.profile.isFullTimeStudent || offer.profile.isEmployed || !offer.profile.online || !offer.profile.heartbeatAt || offer.profile.heartbeatAt.getTime() + this.settings.heartbeatTtlMs <= now.getTime()) fail('请重新上线后接单', 409, 'ANSWERER_OFFLINE');
+      if (!offer.profile.enabled || offer.profile.profileSource !== 'SELF_DECLARED' || !offer.profile.user.teacherAccount?.qualificationConfirmedAt || !offer.profile.isAdult || !offer.profile.isFullTimeStudent || offer.profile.isEmployed || !offer.profile.online || !offer.profile.heartbeatAt || offer.profile.heartbeatAt.getTime() + this.settings.heartbeatTtlMs <= now.getTime()) fail('请重新上线后接单', 409, 'ANSWERER_OFFLINE');
       const changed = await tx.invitation.updateMany({ where: { id: offerId, status: 'PENDING', deadlineAt: { gt: now } }, data: { status: 'ACCEPTED', decidedAt: now } });
       if (!changed.count) fail('邀请已失效', 409, 'STATE_CONFLICT');
       await tx.questionRequest.updateMany({ where: { id: offer.requestId, status: 'OFFERED' }, data: { status: 'MATCHED', matchedAt: now } });
@@ -378,7 +380,7 @@ export class Domain {
     const comment = input.comment === undefined ? '' : text(input.comment, '意见', 0, 500);
     return this.transaction(async (tx, now) => {
       const session = await this.member(tx, userId, sessionId);
-      if (session.askerId !== userId) fail('只有提问者可以评价', 403, 'FORBIDDEN');
+      if (session.askerId !== userId) fail('只有学生可以评价', 403, 'FORBIDDEN');
       if (!session.endedAt || session.endReason === 'ABANDONED') fail('答疑尚未完成，不能评价', 409, 'SESSION_NOT_COMPLETED');
       const previous = await tx.feedback.findUnique({ where: { sessionId } });
       if (previous) return previous;
@@ -400,8 +402,8 @@ export class Domain {
   async adminData(userId: string) {
     return this.transaction(async tx => {
       await this.user(tx, userId, 'ADMIN');
-      const requests = await tx.questionRequest.findMany({ select: { status: true, subjectId: true, createdAt: true, matchedAt: true } });
-      const feedbacks = await tx.feedback.findMany({ select: { resolution: true } });
+      const requests = await tx.questionRequest.findMany({ where: { asker: { studentAccount: { isNot: null } }, OR: [{ session: { is: null } }, { session: { is: { answerer: { teacherAccount: { isNot: null } } } } }] }, select: { status: true, subjectId: true, createdAt: true, matchedAt: true } });
+      const feedbacks = await tx.feedback.findMany({ where: { session: { asker: { studentAccount: { isNot: null } }, answerer: { teacherAccount: { isNot: null } } } }, select: { resolution: true } });
       const matched = requests.filter(r => r.matchedAt !== null);
       const subjects = await tx.subject.findMany({ orderBy: { id: 'asc' } });
       const stats = {
@@ -414,17 +416,79 @@ export class Domain {
         feedbackCount: feedbacks.length,
         bySubject: subjects.map(s => ({ ...s, count: requests.filter(r => r.subjectId === s.id).length })),
       };
-      const users = await tx.user.findMany({ include: { profile: { include: { subjects: { include: { subject: true } } } } }, orderBy: { id: 'asc' } });
-      return { stats, subjects, users: users.map(u => ({ ...publicUser(u), enabled: u.profile?.enabled ?? true, bio: u.profile?.bio ?? '', subjects: u.profile?.subjects.map(s => s.subject) ?? [] })) };
+      const users = await tx.user.findMany({
+        where: { OR: [{ studentAccount: { isNot: null } }, { teacherAccount: { isNot: null } }, { adminAccount: { isNot: null } }] },
+        include: {
+          profile: { include: { subjects: { include: { subject: true } } } },
+          studentAccount: { select: { username: true, displayName: true, university: true, major: true, adultConfirmedAt: true, termsAcceptedAt: true, termsVersion: true, createdAt: true } },
+          teacherAccount: { select: { username: true, displayName: true, university: true, degree: true, major: true, qualificationConfirmedAt: true, adultConfirmedAt: true, termsAcceptedAt: true, termsVersion: true, createdAt: true } },
+          adminAccount: { select: { username: true, createdAt: true } },
+        }, orderBy: { id: 'asc' },
+      });
+      const accounts = users.map(u => ({
+        ...publicUser(u), portal: u.studentAccount ? 'student' : u.teacherAccount ? 'teacher' : 'admin',
+        username: u.studentAccount?.username ?? u.teacherAccount?.username ?? u.adminAccount?.username,
+        studentProfile: u.studentAccount, teacherProfile: u.teacherAccount,
+        enabled: u.profile?.enabled ?? true, bio: u.profile?.bio ?? '',
+        profileSource: u.profile?.profileSource ?? null,
+        subjects: u.profile?.subjects.map(s => s.subject) ?? [],
+      }));
+      return { stats, subjects, users: accounts, studentAccounts: accounts.filter(a => a.portal === 'student'), teacherAccounts: accounts.filter(a => a.portal === 'teacher') };
+
+    });
+  }
+  async updateTeacherProfile(userId: string, input: {
+    displayName?: string; university?: string | null; major?: string | null;
+    degree?: string; bio?: string; subjectIds?: string[];
+  }) {
+    const displayName = input.displayName === undefined ? undefined : text(input.displayName, '显示名称', 2, 40);
+    const university = input.university === undefined ? undefined : input.university === null ? null : text(input.university, '学校', 0, 120) || null;
+    const major = input.major === undefined ? undefined : input.major === null ? null : text(input.major, '专业', 0, 120) || null;
+    const bio = input.bio === undefined ? undefined : text(input.bio, '擅长方向', 0, 500);
+    if (input.degree !== undefined && !['UNDERGRADUATE', 'MASTER', 'DOCTORATE'].includes(input.degree)) fail('请选择有效的学历阶段');
+    if (input.subjectIds !== undefined && (!Array.isArray(input.subjectIds) || !input.subjectIds.length || input.subjectIds.length > 32 || input.subjectIds.some(s => typeof s !== 'string'))) fail('请选择有效的可答科目');
+    const subjectIds = input.subjectIds === undefined ? undefined : [...new Set(input.subjectIds)];
+    return this.transaction(async (tx, now) => {
+      await this.user(tx, userId, 'ANSWERER');
+      const account = await tx.teacherAccount.findUniqueOrThrow({ where: { userId } });
+      const profile = await tx.answererProfile.findUniqueOrThrow({ where: { userId }, include: { subjects: true } });
+      if (subjectIds && await tx.subject.count({ where: { id: { in: subjectIds } } }) !== subjectIds.length) fail('所选科目不存在');
+      const subjectChanged = subjectIds !== undefined && JSON.stringify([...subjectIds].sort()) !== JSON.stringify(profile.subjects.map(s => s.subjectId).sort());
+      const reviewRequired = (university !== undefined && university !== account.university)
+        || (major !== undefined && major !== account.major)
+        || (input.degree !== undefined && input.degree !== account.degree)
+        || (bio !== undefined && bio !== profile.bio) || subjectChanged;
+      await tx.teacherAccount.update({ where: { userId }, data: {
+        ...(displayName !== undefined ? { displayName } : {}),
+        ...(university !== undefined ? { university } : {}), ...(major !== undefined ? { major } : {}),
+        ...(input.degree !== undefined ? { degree: input.degree } : {}),
+      } });
+      if (displayName !== undefined) await tx.user.update({ where: { id: userId }, data: { name: displayName } });
+      await tx.answererProfile.update({ where: { userId }, data: {
+        ...(bio !== undefined ? { bio } : {}),
+        ...(reviewRequired ? { enabled: false, online: false, heartbeatAt: null } : {}),
+      } });
+      if (subjectChanged && subjectIds) {
+        await tx.answererSubject.deleteMany({ where: { answererId: userId } });
+        for (const subjectId of subjectIds) await tx.answererSubject.create({ data: { answererId: userId, subjectId } });
+      }
+      if (reviewRequired) {
+        const offers = await tx.invitation.findMany({ where: { answererId: userId, status: 'PENDING' }, include: { request: true } });
+        for (const offer of offers) await this.decideRejection(tx, offer, now, userId, 'PROFILE_CHANGED');
+      }
+      await this.event(tx, 'TEACHER_PROFILE_UPDATED', now, { actorId: userId, detail: reviewRequired ? 'REVIEW_REQUIRED' : 'DISPLAY_UPDATED' });
+      await this.schedule(tx, now);
+      return { reviewRequired, profile: this.card(await tx.answererProfile.findUniqueOrThrow({ where: { userId }, include: profileInclude }), now) };
     });
   }
   async updateAnswerer(userId: string, answererId: string, input: { enabled: boolean; subjectIds: string[] }) {
-    if (typeof input.enabled !== 'boolean' || !Array.isArray(input.subjectIds) || input.subjectIds.some(s => typeof s !== 'string')) fail('答疑者设置格式不正确');
+    if (typeof input.enabled !== 'boolean' || !Array.isArray(input.subjectIds) || input.subjectIds.some(s => typeof s !== 'string')) fail('教师设置格式不正确');
     const subjectIds = [...new Set(input.subjectIds)];
     return this.transaction(async (tx, now) => {
       await this.user(tx, userId, 'ADMIN');
-      const profile = await tx.answererProfile.findUnique({ where: { userId: answererId } });
-      if (!profile) fail('答疑者不存在', 404, 'NOT_FOUND');
+      const profile = await tx.answererProfile.findUnique({ where: { userId: answererId }, include: { user: { include: { teacherAccount: { select: { qualificationConfirmedAt: true } } } } } });
+      if (!profile || !profile.user.teacherAccount || profile.profileSource !== 'SELF_DECLARED') fail('教师不存在', 404, 'NOT_FOUND');
+      if (input.enabled && (!profile.isAdult || !profile.isFullTimeStudent || profile.isEmployed || !profile.user.teacherAccount?.qualificationConfirmedAt)) fail('教师须确认成年、非在职的全日制在校资格后才能启用', 409, 'QUALIFICATION_REQUIRED');
       if (await tx.subject.count({ where: { id: { in: subjectIds } } }) !== subjectIds.length) fail('所选科目不存在');
       await tx.answererProfile.update({ where: { userId: answererId }, data: { enabled: input.enabled, ...(!input.enabled ? { online: false, heartbeatAt: null } : {}) } });
       await tx.answererSubject.deleteMany({ where: { answererId } });

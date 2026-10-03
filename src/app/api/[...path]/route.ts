@@ -1,17 +1,21 @@
 import { randomUUID } from "node:crypto";
 import { NextResponse } from "next/server";
-import { db } from "@/server/db";
 import { domain } from "@/server/domain";
 import { DomainError } from "@/server/errors";
-import { demoLogin, getUser, isDemoMode, logout, requireUser } from "@/server/auth";
+import { getUser, isPortal, loginAccount, logout, readProfile, registerAccount, requestPortal, requireUser, updateProfile } from "@/server/auth";
+import { readMonitorSnapshot, recordEvent, reportError } from "@/server/monitoring";
 import { downloadAttachment, uploadAttachment } from "@/server/attachments";
 import { cleanupRtcRoom, issueRtcAccess, retryRtcCleanup } from "@/server/rtc";
-import { HttpError, assertSameOrigin, optionalString, rateLimit, readJson, requiredBoolean, requiredString } from "@/server/security";
+import { HttpError, assertSameOrigin, loginRateBucket, optionalString, rateLimit, readJson, requiredBoolean, requiredString } from "@/server/security";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
 type Context = { params: Promise<{ path: string[] }> };
+const MONITOR_RESOURCES = new Set([
+  "student", "teacher", "admin", "me", "catalog", "requests", "answer", "sessions",
+  "attachments", "history", "presence", "heartbeat", "offers", "client-errors",
+]);
 
 function json(data: unknown) { return NextResponse.json(data); }
 function identifier(value: unknown) { return requiredString(value, "资源编号", 200); }
@@ -25,22 +29,22 @@ function csvCell(value: string | number | null) {
 async function get(request: Request, parts: string[]): Promise<Response> {
   const [resource, id, action] = parts;
   if (parts.length === 1 && resource === "me") {
+    const portal = requestPortal(request);
     const user = await getUser(request);
-    const demoMode = isDemoMode();
-    const accounts = demoMode
-      ? await db.user.findMany({
-        where: { id: { in: ["asker-a", "asker-b", "answerer-a", "answerer-b", "answerer-c", "admin"] } },
-        orderBy: { id: "asc" },
-        select: { id: true, name: true, role: true },
-      }) : [];
-    return json({ user, demoMode, accounts });
+    return json({ user, portal });
   }
+  if (isPortal(resource) && id === "profile" && parts.length === 2) return json(await readProfile(request, resource));
+  if (isPortal(resource) && id === "auth") throw new HttpError(404, "接口不存在。", "NOT_FOUND");
   if (parts.length === 1 && resource === "catalog") {
     const result = await domain.catalog();
     await retryRtcCleanup();
     return json(result);
   }
   const user = await requireUser(request);
+  if (resource === "admin" && parts.length === 2 && id === "monitoring") {
+    if (user.role !== "ADMIN") throw new HttpError(403, "仅管理员可以访问运行监控。", "FORBIDDEN");
+    return json(readMonitorSnapshot());
+  }
   if (resource === "requests" && parts.length === 2) {
     return json({ request: await domain.getRequest(user.id, identifier(id)) });
   }
@@ -87,14 +91,27 @@ async function get(request: Request, parts: string[]): Promise<Response> {
 async function post(request: Request, parts: string[]): Promise<Response> {
   assertSameOrigin(request);
   const [resource, id, action] = parts;
-  if (resource === "login" && parts.length === 1) {
+  if (["login", "logout"].includes(resource) && parts.length === 1) throw new HttpError(404, "请使用对应账号入口登录。", "NOT_FOUND");
+  if (isPortal(resource) && id === "auth" && parts.length === 3) {
+    if (action === "logout") return logout(request, resource);
     const body = await readJson(request);
-    return demoLogin(request, body.accountId);
+    if (action === "login") return loginAccount(request, resource, body);
+    if (action === "register" && resource !== "admin") return registerAccount(request, resource, body);
+    throw new HttpError(404, "此入口没有公开注册接口。", "NOT_FOUND");
   }
-  if (resource === "logout" && parts.length === 1) {
+  if (isPortal(resource) && id === "profile" && (parts.length === 2 || (parts.length === 3 && action === "password"))) {
+    return updateProfile(request, resource, await readJson(request), action === "password");
+  }
+  if (resource === "client-errors" && parts.length === 1) {
     const user = await getUser(request);
-    if (user?.role === "ANSWERER") await domain.setPresence(user.id, false);
-    return logout(request);
+    await rateLimit(`client-error:${user?.id ?? loginRateBucket(request)}`, 20);
+    const body = await readJson(request);
+    const digest = typeof body.digest === "string" && /^[a-fA-F0-9]{1,64}$/.test(body.digest) ? body.digest : undefined;
+    const page = typeof body.path === "string" && body.path.length <= 200 ? body.path.split("?")[0] : "";
+    const operation = page.startsWith("/student") ? "CLIENT_STUDENT"
+      : page.startsWith("/teacher") ? "CLIENT_TEACHER" : page.startsWith("/admin") ? "CLIENT_ADMIN" : "CLIENT_PUBLIC";
+    recordEvent({ kind: "CLIENT_ERROR", code: "CLIENT_RENDER_ERROR", digest, operation });
+    return json({ ok: true });
   }
   const user = await requireUser(request);
   if (resource === "attachments" && parts.length === 1) {
@@ -179,13 +196,17 @@ async function handle(request: Request, context: Context, method: "GET" | "POST"
     if (!Array.isArray(path) || path.length < 1 || path.length > 3) throw new HttpError(404, "接口不存在。", "NOT_FOUND");
     const response = await (method === "GET" ? get(request, path) : post(request, path));
     response.headers.set("Cache-Control", "private, no-store, max-age=0");
-    response.headers.set("Vary", "Cookie");
+    response.headers.set("Vary", "Cookie, X-Yanban-Portal");
     response.headers.set("X-Content-Type-Options", "nosniff");
     return response;
   } catch (error) {
     const known = error instanceof HttpError || error instanceof DomainError;
     const requestId = randomUUID();
-    if (!known) console.error("API_INTERNAL_ERROR", requestId);
+    if (!known) {
+      const resource = new URL(request.url).pathname.split("/")[2];
+      const first = MONITOR_RESOURCES.has(resource) ? resource.toUpperCase().replaceAll("-", "_") : "UNKNOWN";
+      reportError(error, { requestId, operation: `API_${method}_${first}` });
+    }
     return NextResponse.json({
       error: known ? error.message : "服务暂时不可用，请稍后重试。",
       code: known ? error.code : "INTERNAL_ERROR",

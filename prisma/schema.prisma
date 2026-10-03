@@ -18,6 +18,9 @@ model User {
   role            String
   createdAt       DateTime @default(now())
   profile         AnswererProfile?
+  studentAccount  StudentAccount?
+  teacherAccount  TeacherAccount?
+  adminAccount    AdminAccount?
   loginSessions   LoginSession[]
   requests        QuestionRequest[]
   askerSessions   AnswerSession[] @relation("AskerSessions")
@@ -31,11 +34,56 @@ model User {
 model LoginSession {
   id        String @id @default(cuid())
   tokenHash String @unique
+  portal    String @default("LEGACY")
   userId    String
   user      User @relation(fields: [userId], references: [id], onDelete: Cascade)
   expiresAt DateTime
   createdAt DateTime @default(now())
   @@index([expiresAt])
+}
+
+
+// Student and teacher credentials have separate username namespaces and profile records.
+// User is only the shared business principal; no password is stored on it.
+model StudentAccount {
+  userId       String @id
+  user         User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  username     String @unique
+  passwordHash String
+  displayName  String
+  university   String?
+  major        String?
+  adultConfirmedAt DateTime?
+  termsAcceptedAt DateTime?
+  termsVersion String?
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+}
+
+model TeacherAccount {
+  userId                   String @id
+  user                     User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  username                 String @unique
+  passwordHash             String
+  displayName              String
+  university               String?
+  degree                   String?
+  major                    String?
+  adultConfirmedAt         DateTime?
+  termsAcceptedAt          DateTime?
+  termsVersion             String?
+  qualificationConfirmedAt DateTime?
+  createdAt                DateTime @default(now())
+  updatedAt                DateTime @updatedAt
+}
+
+model AdminAccount {
+  userId       String @id
+  user         User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  username     String @unique
+  passwordHash String
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
 }
 
 model Subject {
@@ -49,7 +97,7 @@ model AnswererProfile {
   userId      String @id
   user        User @relation(fields: [userId], references: [id], onDelete: Cascade)
   bio         String @default("")
-  enabled     Boolean @default(true)
+  enabled     Boolean @default(false)
   isAdult     Boolean @default(true)
   isFullTimeStudent Boolean @default(true)
   isEmployed  Boolean @default(false)
