@@ -8,7 +8,7 @@ import { HttpError } from '../src/server/security';
 async function main() {
   if (process.argv.length > 2) throw new HttpError(400, '管理员初始化不接收命令行凭据，请直接运行 npm run admin:create。');
   if (!process.stdin.isTTY || !process.stdout.isTTY) {
-    throw new HttpError(400, '需要交互终端以隐藏密码。Windows Git Bash 请运行 winpty npm run admin:create；也可在 PowerShell 运行 npm run admin:create。');
+    throw new HttpError(400, '需要交互终端以隐藏密码。Windows Git Bash 请运行 winpty node.exe scripts/admin-create.mjs；也可在 PowerShell 运行 npm.cmd run admin:create。');
   }
   if (await db.adminAccount.count()) throw new HttpError(409, '管理员已初始化，请使用现有管理员账号登录；此命令不会覆盖账号或重置密码。');
 

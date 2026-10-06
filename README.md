@@ -73,7 +73,7 @@ npm run admin:create
 
 按提示创建专用管理员账号与隐藏口令，再访问 `/admin/login`。无出厂密码，无公开管理员注册。已有管理员不会被此命令重置。
 
-若Git Bash报告终端不支持隐藏口令，尝试 `winpty npm run admin:create`；也可在项目目录打开PowerShell执行同一命令。不要把口令放进命令行参数、代码或Git。
+若Git Bash报告终端不支持隐藏口令，执行 `winpty node.exe scripts/admin-create.mjs`。winpty需要启动原生可执行文件，因此这里直接运行Node入口。也可在项目目录打开PowerShell执行 `npm.cmd run admin:create`。不要把口令放进命令行参数、代码或Git。
 
 管理员在教师列表审核资料、启用账号并设置可答科目。CSV只导出汇总，不导出私人聊天、图片或口令摘要。
 
